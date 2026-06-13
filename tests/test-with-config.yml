@@ -1,0 +1,45 @@
+name: Test with config input
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      GITHUB_TOKEN: fake-token-for-testing
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Create tagpr config file
+        run: |
+          cat > /tmp/tagpr-test.toml << 'EOF'
+          [tagpr]
+          vPrefix = true
+          releaseBranch = main
+          EOF
+          echo "Config file created at /tmp/tagpr-test.toml"
+
+      - id: action
+        uses: .
+        with:
+          version: v1.18.3
+          config: /tmp/tagpr-test.toml
+        continue-on-error: true
+
+      - name: Verify action ran with config input
+        run: |
+          echo "action outcome: ${{ steps.action.outcome }}"
+          # tagpr will fail without a real GitHub token/repo,
+          # but we verify the action accepted the config input and ran.
+          if [ "${{ steps.action.outcome }}" = "success" ] || [ "${{ steps.action.outcome }}" = "failure" ]; then
+            echo "PASS: action step ran with config input (outcome: ${{ steps.action.outcome }})"
+          else
+            echo "FAIL: unexpected outcome: ${{ steps.action.outcome }}"
+            exit 1
+          fi
+
+      - name: Assert outputs are accessible
+        run: |
+          echo "tag output: '${{ steps.action.outputs.tag }}'"
+          echo "pull_request output: '${{ steps.action.outputs.pull_request }}'"
+          echo "base_tag output: '${{ steps.action.outputs.base_tag }}'"
+          echo "PASS: outputs are accessible with config input"

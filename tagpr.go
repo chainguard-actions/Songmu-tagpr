@@ -1,0 +1,1118 @@
+package tagpr
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log"
+	"net/url"
+	"os"
+	"path/filepath"
+	"regexp"
+	"slices"
+	"strconv"
+	"strings"
+	"text/template"
+	"time"
+
+	"github.com/Songmu/gitconfig"
+	"github.com/Songmu/gitsemvers"
+	"github.com/Songmu/tagpr/gh2changelog"
+	"github.com/google/go-github/v83/github"
+	"github.com/k1LoW/calver"
+)
+
+const (
+	defaultReleaseBranch = "main"
+	autoCommitMessage    = "prepare for the next release"
+	autoChangelogMessage = "update CHANGELOG.md"
+	autoLabelName        = "tagpr"
+	branchPrefix         = "tagpr-from-"
+	dependabotLogin      = "dependabot[bot]"
+)
+
+type tagpr struct {
+	c                       *commander
+	gh                      *github.Client
+	cfg                     *config
+	gitPath                 string
+	remoteName, owner, repo string
+	out                     io.Writer
+	normalizedTagPrefix     string
+}
+
+func (tp *tagpr) latestSemverTag() string {
+	// CalVer mode: bypass gitsemvers because it normalizes version strings
+	// and loses zero-padding (e.g., v2026.0123.0 becomes invalid)
+	if tp.cfg.CalendarVersioning() {
+		return tp.latestCalverTag()
+	}
+
+	vers := (&gitsemvers.Semvers{
+		GitPath:   tp.gitPath,
+		TagPrefix: tp.cfg.TagPrefix(),
+	}).VersionStrings()
+
+	fixedMajor, _ := tp.cfg.FixedMajorVersion()
+
+	for _, v := range vers {
+		semvPart := strings.TrimPrefix(v, tp.normalizedTagPrefix)
+
+		// Filter by fixedMajorVersion
+		if fixedMajor != nil {
+			sv, err := newSemver(semvPart)
+			if err != nil {
+				continue
+			}
+			if sv.sv.Major() != *fixedMajor {
+				continue
+			}
+		}
+
+		// Filter by vPrefix
+		if tp.cfg.vPrefix != nil {
+			if strings.HasPrefix(semvPart, "v") == *tp.cfg.vPrefix {
+				return v
+			}
+		} else {
+			// When vPrefix is not defined (i.e. first time tagpr setup), just return the first matching value.
+			return v
+		}
+	}
+	return ""
+}
+
+func (tp *tagpr) latestCalverTag() string {
+	format := tp.cfg.CalendarVersioningFormat()
+	if format == "" {
+		format = defaultCalendarVersioningFormat
+	}
+	prefix := tp.normalizedTagPrefix
+
+	out, _, err := tp.c.Git("tag", "-l")
+	if err != nil {
+		return ""
+	}
+
+	type tagCV struct {
+		tag string
+		cv  *calver.Calver
+	}
+	var tagCVs []tagCV
+
+	for _, tag := range strings.Split(out, "\n") {
+		tag = strings.TrimSpace(tag)
+		if tag == "" {
+			continue
+		}
+
+		if prefix != "" && !strings.HasPrefix(tag, prefix) {
+			continue
+		}
+
+		verPart := strings.TrimPrefix(tag, prefix)
+		hasVPrefix := strings.HasPrefix(verPart, "v")
+		verStr := strings.TrimPrefix(verPart, "v")
+
+		if tp.cfg.vPrefix != nil && hasVPrefix != *tp.cfg.vPrefix {
+			continue
+		}
+
+		cv, err := calver.Parse(format, verStr)
+		if err != nil {
+			continue
+		}
+
+		tagCVs = append(tagCVs, tagCV{tag: tag, cv: cv})
+	}
+
+	if len(tagCVs) == 0 {
+		return ""
+	}
+
+	cvs := make(calver.Calvers, len(tagCVs))
+	for i, tc := range tagCVs {
+		cvs[i] = tc.cv
+	}
+	latest, err := cvs.Latest()
+	if err != nil {
+		return ""
+	}
+
+	for _, tc := range tagCVs {
+		if tc.cv.String() == latest.String() {
+			return tc.tag
+		}
+	}
+
+	return ""
+}
+
+func (tp *tagpr) getNextLabels(ctx context.Context, mergedFeatureHeadShas []string, prShasStr, fromCommitish string) ([]string, error) {
+	var prIssues []*github.Issue
+	var err error
+	for line := range strings.SplitSeq(prShasStr, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 2 {
+			continue
+		}
+		sha, ref := fields[0], fields[1]
+		for _, mergedSha := range mergedFeatureHeadShas {
+			if strings.HasPrefix(sha, mergedSha) {
+				prNumStr := strings.Trim(ref, "head/rfspul")
+				prNum, err := strconv.Atoi(prNumStr)
+				if err != nil {
+					continue
+				}
+				issue, resp, err := tp.gh.Issues.Get(ctx, tp.owner, tp.repo, prNum)
+				if err != nil {
+					showGHError(err, resp)
+					return []string{}, err
+				}
+				prIssues = append(prIssues, issue)
+			}
+		}
+	}
+
+	// When "--abbrev" is specified, the length of the each line of the stdout isn't fixed.
+	// It is just a minimum length, and if the commit cannot be uniquely identified with
+	// that length, a longer commit hash will be displayed.
+	// We specify this option to minimize the length of the query string, but we use
+	// "--abbrev=7" because the SHA syntax of the search API requires a string of at
+	// least 7 characters.
+	// ref. https://docs.github.com/en/search-github/searching-on-github/searching-issues-and-pull-requests#search-by-commit-sha
+	// This is done because there is a length limit on the API query string, and we want
+	// to create a string with the minimum possible length.
+
+	releaseBranch := tp.cfg.ReleaseBranch()
+
+	logArgs := []string{"log", "--pretty=format:%h", "--abbrev=7", "--no-merges", "--first-parent",
+		fmt.Sprintf("%s..%s/%s", fromCommitish, tp.remoteName, releaseBranch)}
+	if tp.normalizedTagPrefix != "" {
+		logArgs = append(logArgs, "--", strings.TrimSuffix(tp.normalizedTagPrefix, "/"))
+	}
+	shasStr, _, err := tp.c.Git(logArgs...)
+	if err != nil {
+		return []string{}, err
+	}
+	queryBase := fmt.Sprintf("repo:%s/%s is:pr is:closed", tp.owner, tp.repo)
+	for _, query := range buildChunkSearchIssuesQuery(queryBase, shasStr) {
+		tmpIssues, err := tp.searchIssues(ctx, query)
+		if err != nil {
+			return []string{}, err
+		}
+		prIssues = append(prIssues, tmpIssues...)
+	}
+
+	nextLabels := tp.generateNextLabels(prIssues)
+
+	return nextLabels, nil
+}
+
+func (tp *tagpr) initializeReleaseYaml(path string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return err
+	}
+	if err := os.WriteFile(path, []byte(`changelog:
+  exclude:
+    labels:
+      - tagpr
+`), 0644); err != nil {
+		return err
+	}
+	_, _, _ = tp.c.Git("add", "-f", path)
+	return nil
+}
+
+func newTagPR(ctx context.Context, c *commander) (*tagpr, error) {
+	tp := &tagpr{c: c, gitPath: c.gitPath, out: c.outStream}
+
+	var err error
+	tp.remoteName, err = tp.detectRemote()
+	if err != nil {
+		return nil, err
+	}
+	remoteURL, _, err := tp.c.Git("config", "remote."+tp.remoteName+".url")
+	if err != nil {
+		return nil, err
+	}
+	u, err := parseGitURL(remoteURL)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse remote")
+	}
+	m := strings.Split(strings.TrimPrefix(u.Path, "/"), "/")
+	if len(m) < 2 {
+		return nil, fmt.Errorf("failed to detect owner and repo from remote URL")
+	}
+	tp.owner = m[0]
+	repo := m[1]
+	if u.Scheme == "ssh" || u.Scheme == "git" {
+		repo = strings.TrimSuffix(repo, ".git")
+	}
+	tp.repo = repo
+
+	token, err := gitconfig.GitHubToken(u.Hostname())
+	if err != nil {
+		return nil, err
+	}
+	cli, err := ghClient(ctx, token, u.Host)
+	if err != nil {
+		return nil, err
+	}
+	tp.gh = cli
+
+	// pass u.Host instead of host because u.Host includes port number if exists.
+	tp.c.SetToken(token, u.Host)
+
+	isShallow, _, err := tp.c.Git("rev-parse", "--is-shallow-repository")
+	if err != nil {
+		return nil, err
+	}
+	if isShallow == "true" {
+		if _, _, err := tp.c.Git("fetch", "--unshallow"); err != nil {
+			return nil, err
+		}
+	}
+	tp.cfg, err = newConfig(tp.gitPath)
+	if err != nil {
+		return nil, err
+	}
+	tp.normalizedTagPrefix = normalizeTagPrefix(tp.cfg.TagPrefix())
+	return tp, nil
+}
+
+// isTagPR checks if a PR is a tagpr-generated PR that matches this instance's configuration
+func (tp *tagpr) isTagPR(pr *github.PullRequest) bool {
+	// Basic validation
+	if pr == nil {
+		return false
+	}
+	if pr.Head == nil || pr.Head.Ref == nil {
+		return false
+	}
+
+	headRef := *pr.Head.Ref
+
+	// Check branch prefix
+	if !strings.HasPrefix(headRef, branchPrefix) {
+		return false
+	}
+
+	// Extract suffix after branch prefix
+	suffix := headRef[len(branchPrefix):]
+
+	// Get expected prefix for this tagpr instance
+	// branchSafePrefix converts tag prefixes like "gh2changelog/" to "gh2changelog-"
+	expectedBranchPrefix := branchSafePrefix(tp.normalizedTagPrefix)
+
+	// Validate prefix matches configuration
+	matched := false
+	if expectedBranchPrefix == "" {
+		// Root module (no prefix): reject branches with module prefixes
+		// Find where version begins (first 'v' or digit)
+		versionPos := strings.IndexFunc(suffix, func(r rune) bool {
+			return r == 'v' || (r >= '0' && r <= '9')
+		})
+		// Version must start at position 0 (no module prefix before it)
+		// If no version marker found, versionPos is -1 and matched stays false
+		matched = (versionPos == 0 && !strings.ContainsRune(suffix, '-'))
+	} else {
+		// Submodule (has prefix): branch must contain our prefix
+		matched = strings.HasPrefix(suffix, expectedBranchPrefix)
+	}
+
+	if !matched {
+		return false
+	}
+
+	// Check for tagpr label
+	for _, lbl := range pr.Labels {
+		if lbl.GetName() == autoLabelName {
+			return true
+		}
+	}
+
+	return false
+}
+
+func (tp *tagpr) Run(ctx context.Context) error {
+	commitMessage := tp.cfg.CommitPrefix() + " " + autoCommitMessage
+	changelogMessage := tp.cfg.CommitPrefix() + " " + autoChangelogMessage
+
+	latestSemverTag := tp.latestSemverTag()
+	tp.setOutput("base_tag", latestSemverTag)
+	currVerStr := latestSemverTag
+	fromCommitish := "refs/tags/" + currVerStr
+	if currVerStr == "" {
+		var err error
+		fromCommitish, _, err = tp.c.Git("rev-list", "--max-parents=0", "HEAD")
+		if err != nil {
+			return err
+		}
+		currVerStr = "v0.0.0"
+	} else {
+		// Strip prefix for newSemver (fromCommitish already has full tag name)
+		currVerStr = strings.TrimPrefix(currVerStr, tp.normalizedTagPrefix)
+	}
+	currVer, err := newSemver(currVerStr)
+	if err != nil {
+		return err
+	}
+
+	if tp.cfg.vPrefix == nil {
+		if err := tp.cfg.SetVPrefix(currVer.vPrefix); err != nil {
+			return err
+		}
+	} else {
+		currVer.vPrefix = *tp.cfg.vPrefix
+	}
+
+	currVer.asCalendarVersion = tp.cfg.CalendarVersioning()
+	currVer.calverFormat = tp.cfg.CalendarVersioningFormat()
+
+	releaseBranch := tp.cfg.ReleaseBranch()
+	if releaseBranch == "" {
+		releaseBranch, _ = tp.defaultBranch()
+		if releaseBranch == "" {
+			releaseBranch = defaultReleaseBranch
+		}
+		if err := tp.cfg.SetReleaseBranch(releaseBranch); err != nil {
+			return err
+		}
+	}
+
+	branch, _, err := tp.c.Git("symbolic-ref", "--short", "HEAD")
+	if err != nil {
+		return fmt.Errorf("failed to git symbolic-ref: %w", err)
+	}
+	if branch != releaseBranch {
+		return fmt.Errorf("you are not on release branch %q, current branch is %q",
+			releaseBranch, branch)
+	}
+
+	// If the latest commit is a merge commit of the pull request by tagpr,
+	// tag the semver to the commit and create a release and exit.
+	if pr, err := tp.latestPullRequest(ctx); err != nil || tp.isTagPR(pr) {
+		if err != nil {
+			return err
+		}
+		if err := tp.tagRelease(ctx, pr, currVer, latestSemverTag); err != nil {
+			return err
+		}
+		b, _ := json.Marshal(pr)
+		tp.setOutput("pull_request", string(b))
+		return nil
+	}
+	mergeLogArgs := []string{"log", "--merges", "--first-parent", "--pretty=format:%P",
+		fmt.Sprintf("%s..%s/%s", fromCommitish, tp.remoteName, releaseBranch)}
+	if tp.normalizedTagPrefix != "" {
+		mergeLogArgs = append(mergeLogArgs, "--", strings.TrimSuffix(tp.normalizedTagPrefix, "/"))
+	}
+	shasStr, _, err := tp.c.Git(mergeLogArgs...)
+	if err != nil {
+		return err
+	}
+	var mergedFeatureHeadShas []string
+	for line := range strings.SplitSeq(shasStr, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		mergedFeatureHeadShas = append(mergedFeatureHeadShas, fields[1])
+	}
+	prShasStr, _, err := tp.c.Git("ls-remote", tp.remoteName, "refs/pull/*/head")
+	if err != nil {
+		return err
+	}
+
+	nextLabels, err := tp.getNextLabels(ctx, mergedFeatureHeadShas, prShasStr, fromCommitish)
+	if err != nil {
+		return err
+	}
+
+	// Get the latest commit of the release branch
+	ref, resp, err := tp.gh.Git.GetRef(ctx, tp.owner, tp.repo, "refs/heads/"+releaseBranch)
+	if err != nil {
+		showGHError(err, resp)
+		return err
+	}
+
+	rcBranch := fmt.Sprintf("%s%s%s", branchPrefix, branchSafePrefix(tp.normalizedTagPrefix), currVer.Tag())
+	head := fmt.Sprintf("%s:%s", tp.owner, rcBranch)
+	pulls, resp, err := tp.gh.PullRequests.List(ctx, tp.owner, tp.repo,
+		&github.PullRequestListOptions{
+			Head: head,
+			Base: releaseBranch,
+		})
+	if err != nil {
+		showGHError(err, resp)
+		return err
+	}
+
+	var (
+		labels    []string
+		currTagPR *github.PullRequest
+	)
+	if len(pulls) > 0 {
+		currTagPR = pulls[0]
+		for _, l := range currTagPR.Labels {
+			labels = append(labels, l.GetName())
+		}
+	}
+	nextVer := currVer.GuessNext(append(labels, nextLabels...))
+	var addingLabels []string
+
+	for _, l := range nextLabels {
+		if !slices.Contains(labels, l) {
+			addingLabels = append(addingLabels, l)
+		}
+	}
+
+	var vfiles []string
+	if vf := tp.cfg.VersionFile(); vf != "" && vf != "-" {
+		vfiles = strings.Split(vf, ",")
+		for i, v := range vfiles {
+			vfiles[i] = strings.TrimSpace(v)
+		}
+	} else if tp.cfg.versionFile == nil {
+		vfile, err := detectVersionFile(".", currVer)
+		if err != nil {
+			return err
+		}
+		if err := tp.cfg.SetVersionFile(vfile); err != nil {
+			return err
+		}
+		vfiles = []string{vfile}
+	}
+
+	if prog := tp.cfg.Command(); prog != "" {
+		tp.Exec(prog, currVer, nextVer)
+	}
+
+	if len(vfiles) > 0 && vfiles[0] != "" {
+		for _, vfile := range vfiles {
+			if err := bumpVersionFile(vfile, currVer, nextVer); err != nil {
+				return err
+			}
+		}
+	}
+	tp.c.Git("add", "-f", tp.cfg.conf) // ignore any errors
+
+	if prog := tp.cfg.PostVersionCommand(); prog != "" {
+		tp.Exec(prog, currVer, nextVer)
+	}
+
+	releaseYaml := tp.cfg.ReleaseYAMLPath()
+	if releaseYaml != "" && !exists(releaseYaml) {
+		if err := tp.initializeReleaseYaml(releaseYaml); err != nil {
+			return err
+		}
+	}
+	if releaseYaml == "" {
+		const defaultReleaseYml = ".github/release.yml"
+		const defaultReleaseYaml = ".github/release.yaml"
+		if !exists(defaultReleaseYml) && !exists(defaultReleaseYaml) {
+			if err := tp.initializeReleaseYaml(defaultReleaseYml); err != nil {
+				return err
+			}
+		}
+	}
+
+	// Detect modified files and create a new tree object
+	diffFiles, _, err := tp.c.Git("diff", "--raw", "HEAD")
+	if err != nil {
+		return err
+	}
+	var treeEntries []*github.TreeEntry
+	for line := range strings.SplitSeq(diffFiles, "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		if !strings.HasPrefix(line, ":") {
+			continue
+		}
+		parts := strings.Fields(line)
+		if len(parts) < 6 {
+			continue
+		}
+
+		newMode, status, filePath := parts[1], parts[4], parts[5]
+		switch status {
+		case "A", "M": // Created or modified files
+			contentBytes, err := os.ReadFile(filePath)
+			if err != nil {
+				return err
+			}
+			treeEntries = append(treeEntries, &github.TreeEntry{
+				Path:    github.Ptr(filePath),
+				Type:    github.Ptr("blob"),
+				Content: github.Ptr(string(contentBytes)),
+				Mode:    github.Ptr(newMode),
+			})
+		case "D": // Deleted files
+			treeEntries = append(treeEntries, &github.TreeEntry{
+				SHA:  nil,
+				Path: github.Ptr(filePath),
+				Type: github.Ptr("blob"),
+				Mode: github.Ptr("100644"),
+			})
+		}
+	}
+
+	var tree *github.Tree
+	if len(treeEntries) > 0 {
+		// Create a new tree object if there are changes
+		tree, resp, err = tp.gh.Git.CreateTree(ctx, tp.owner, tp.repo, *ref.Object.SHA, treeEntries)
+		if err != nil {
+			showGHError(err, resp)
+			return err
+		}
+	}
+
+	// Get the parent commit to attach the commit to.
+	parent, resp, err := tp.gh.Repositories.GetCommit(ctx, tp.owner, tp.repo, *ref.Object.SHA, nil)
+	if err != nil {
+		showGHError(err, resp)
+		return err
+	}
+	parent.Commit.SHA = parent.SHA
+
+	// Create a new commit
+	commit := github.Commit{
+		Message: github.Ptr(commitMessage),
+		Tree:    parent.Commit.Tree,
+		Parents: []*github.Commit{parent.Commit},
+	}
+	if tree != nil {
+		commit.Tree = tree
+	}
+	newCommit, resp, err := tp.gh.Git.CreateCommit(ctx, tp.owner, tp.repo, commit, nil)
+	if err != nil {
+		showGHError(err, resp)
+		return err
+	}
+
+	// cherry-pick if the remote branch is exists and changed
+	// XXX: Do I need to apply merge commits too?
+	//     (We omitted merge commits for now, because if we cherry-pick them, we need to add options like "-m 1".
+	cherryLogArgs := []string{"log", "--no-merges", "--pretty=format:%h %s",
+		fmt.Sprintf("%s..%s/%s", releaseBranch, tp.remoteName, rcBranch)}
+	if tp.normalizedTagPrefix != "" {
+		cherryLogArgs = append(cherryLogArgs, "--", strings.TrimSuffix(tp.normalizedTagPrefix, "/"))
+	}
+	out, _, err := tp.c.Git(cherryLogArgs...)
+	if err == nil {
+		var cherryPicks []string
+		for line := range strings.SplitSeq(out, "\n") {
+			if strings.TrimSpace(line) == "" {
+				continue
+			}
+			m := strings.SplitN(line, " ", 2)
+			if len(m) < 2 {
+				continue
+			}
+			commitish := m[0]
+			subject := strings.TrimSpace(m[1])
+			if subject != commitMessage && subject != changelogMessage {
+				cherryPicks = append(cherryPicks, commitish)
+			}
+		}
+		if len(cherryPicks) > 0 {
+			// Specify a commitish one by one for cherry-pick instead of multiple commitish,
+			// and apply it as much as possible.
+
+			// Delete temporary reference if it exists
+			resp, err := tp.gh.Git.DeleteRef(ctx, tp.owner, tp.repo, "refs/heads/tagpr-temp")
+			if err != nil && resp.StatusCode != 422 {
+				showGHError(err, resp)
+				return err
+			}
+
+			tempRef := "refs/heads/tagpr-temp"
+			// Create a temporary reference
+			createRef := github.CreateRef{
+				Ref: tempRef,
+				SHA: *newCommit.SHA,
+			}
+			ref, resp, err = tp.gh.Git.CreateRef(ctx, tp.owner, tp.repo, createRef)
+			if err != nil {
+				showGHError(err, resp)
+				return err
+			}
+
+			for i := len(cherryPicks) - 1; i >= 0; i-- {
+				commitish := cherryPicks[i]
+
+				// Get cherry-pick commit
+				cherryPickCommit, resp, err := tp.gh.Repositories.GetCommit(
+					ctx, tp.owner, tp.repo, commitish, nil)
+				if err != nil {
+					showGHError(err, resp)
+					return err
+				}
+
+				// Create a new commit
+				commit := github.Commit{
+					Message: github.Ptr("cherry-pick: " + commitish),
+					Tree:    newCommit.Tree,
+					Parents: cherryPickCommit.Parents,
+				}
+				tempCommit, resp, err := tp.gh.Git.CreateCommit(ctx, tp.owner, tp.repo, commit, nil)
+				if err != nil {
+					showGHError(err, resp)
+					return err
+				}
+
+				// Update temporary reference
+				updateRef := github.UpdateRef{
+					SHA:   *tempCommit.SHA,
+					Force: github.Ptr(true),
+				}
+				_, resp, err = tp.gh.Git.UpdateRef(ctx, tp.owner, tp.repo, tempRef, updateRef)
+				if err != nil {
+					showGHError(err, resp)
+					return err
+				}
+
+				// Merge
+				mergeRequest := &github.RepositoryMergeRequest{
+					Base: github.Ptr("tagpr-temp"),
+					Head: github.Ptr(commitish),
+				}
+				mergeCommit, resp, err := tp.gh.Repositories.Merge(
+					ctx, tp.owner, tp.repo, mergeRequest)
+				if err != nil {
+					// conflict, etc. / Need error handling in case of non-conflict error?
+					if resp.StatusCode == 409 {
+						continue
+					}
+					showGHError(err, resp)
+					return err
+				}
+
+				// Create a new commit
+				// The Author is not set because setting the same Author as the original commit makes it
+				// difficult to create a Verified Commit.
+				commit = github.Commit{
+					Message: cherryPickCommit.Commit.Message,
+					Tree:    mergeCommit.Commit.Tree,
+					Parents: []*github.Commit{newCommit},
+				}
+				newCommit, resp, err = tp.gh.Git.CreateCommit(ctx, tp.owner, tp.repo, commit, nil)
+				if err != nil {
+					showGHError(err, resp)
+					return err
+				}
+
+				// Update temporary reference
+				updateRef = github.UpdateRef{
+					SHA:   *newCommit.SHA,
+					Force: github.Ptr(true),
+				}
+				_, resp, err = tp.gh.Git.UpdateRef(ctx, tp.owner, tp.repo, tempRef, updateRef)
+				if err != nil {
+					showGHError(err, resp)
+					return err
+				}
+			}
+
+			// Checkout the temporary reference (Files like .tagpr used in subsequent processes may have
+			// been rewritten during the cherry-pick process)
+			if _, _, err := tp.c.Git("fetch"); err != nil {
+				return err
+			}
+			if _, _, err := tp.c.Git("reset", "--hard"); err != nil {
+				return err
+			}
+			if _, _, err := tp.c.Git("checkout", "tagpr-temp"); err != nil {
+				return err
+			}
+
+			// Delete temporary reference
+			resp, err = tp.gh.Git.DeleteRef(ctx, tp.owner, tp.repo, "refs/heads/tagpr-temp")
+			if err != nil {
+				showGHError(err, resp)
+				return err
+			}
+		}
+	}
+
+	// Reread the configuration file (.tagpr) as it may have been rewritten during the cherry-pick process.
+	tp.cfg.Reload()
+	tp.normalizedTagPrefix = normalizeTagPrefix(tp.cfg.TagPrefix())
+	if tp.cfg.VersionFile() != "" && tp.cfg.VersionFile() != "-" {
+		vfiles = strings.Split(tp.cfg.VersionFile(), ",")
+		for i, v := range vfiles {
+			vfiles[i] = strings.TrimSpace(v)
+		}
+	}
+	if len(vfiles) > 0 && vfiles[0] != "" {
+		if tp.cfg.CalendarVersioning() {
+			for _, vfile := range vfiles {
+				if err := bumpVersionFile(vfile, currVer, nextVer); err != nil {
+					return err
+				}
+			}
+		} else {
+			nVer, _ := retrieveVersionFromFile(vfiles[0], nextVer.vPrefix)
+			if nVer != nil && nVer.Naked() != nextVer.Naked() {
+				nextVer = nVer
+			}
+		}
+	}
+
+	opts := []gh2changelog.Option{
+		gh2changelog.GitPath(tp.gitPath),
+		gh2changelog.SetOutputs(tp.c.outStream, tp.c.errStream),
+		gh2changelog.GitHubClient(tp.gh),
+		gh2changelog.TagPrefix(tp.normalizedTagPrefix),
+		gh2changelog.ChangelogMdPath(tp.cfg.ChangelogFile()),
+	}
+	if tp.cfg.ReleaseYAMLPath() != "" {
+		opts = append(opts, gh2changelog.ReleaseYamlPath(tp.cfg.ReleaseYAMLPath()))
+	}
+	if fixedMajor, err := tp.cfg.FixedMajorVersion(); err == nil && fixedMajor != nil {
+		opts = append(opts, gh2changelog.FilteredMajorVersion(*fixedMajor))
+	}
+	if tp.cfg.CalendarVersioning() && latestSemverTag != "" {
+		opts = append(opts, gh2changelog.VersionTags([]string{latestSemverTag}))
+	}
+	gch, err := gh2changelog.New(ctx, opts...)
+	if err != nil {
+		return err
+	}
+
+	draftNextTag := fullTag(tp.normalizedTagPrefix, nextVer.Tag())
+	changelog, orig, err := gch.Draft(ctx, draftNextTag, releaseBranch, time.Now())
+	if err != nil {
+		return err
+	}
+
+	if tp.cfg.changelog == nil || *tp.cfg.changelog {
+		changelogMd := tp.cfg.ChangelogFile()
+		if !exists(changelogMd) {
+			logs, _, err := gch.Changelogs(ctx, 20)
+			if err != nil {
+				return err
+			}
+			changelog = strings.Join(
+				append([]string{changelog}, logs...), "\n")
+		}
+		if _, err := gch.Update(changelog, 0); err != nil {
+			return err
+		}
+
+		// Create a new tree object for CHANGELOG.md
+		treeEntries = nil
+		contentBytes, err := os.ReadFile(changelogMd)
+		if err != nil {
+			return err
+		}
+		treeEntries = append(treeEntries, &github.TreeEntry{
+			Path:    github.Ptr(changelogMd),
+			Type:    github.Ptr("blob"),
+			Content: github.Ptr(string(contentBytes)),
+			Mode:    github.Ptr("100644"),
+		})
+		tree, resp, err = tp.gh.Git.CreateTree(ctx, tp.owner, tp.repo, *newCommit.SHA, treeEntries)
+		if err != nil {
+			showGHError(err, resp)
+			return err
+		}
+		// Create a new commit
+		commit = github.Commit{
+			Message: github.Ptr(changelogMessage),
+			Tree:    tree,
+			Parents: []*github.Commit{newCommit},
+		}
+		newCommit, resp, err = tp.gh.Git.CreateCommit(ctx, tp.owner, tp.repo, commit, nil)
+		if err != nil {
+			showGHError(err, resp)
+			return err
+		}
+	}
+
+	// Create or Get remote rcBranch reference
+	rcBranchRef := "refs/heads/" + rcBranch
+	_, resp, err = tp.gh.Git.GetRef(ctx, tp.owner, tp.repo, rcBranchRef)
+	if err != nil {
+		if resp.StatusCode != 404 {
+			showGHError(err, resp)
+			return err
+		}
+		createNewRef := github.CreateRef{
+			Ref: "refs/heads/" + rcBranch,
+			SHA: *ref.Object.SHA,
+		}
+		_, resp, err = tp.gh.Git.CreateRef(ctx, tp.owner, tp.repo, createNewRef)
+		if err != nil {
+			showGHError(err, resp)
+			return err
+		}
+	}
+	updateRef := github.UpdateRef{
+		SHA:   *newCommit.SHA,
+		Force: github.Ptr(true),
+	}
+	_, resp, err = tp.gh.Git.UpdateRef(ctx, tp.owner, tp.repo, rcBranchRef, updateRef)
+	if err != nil {
+		showGHError(err, resp)
+		return err
+	}
+
+	var tmpl *template.Template
+	if t := tp.cfg.Template(); t != "" {
+		tmpTmpl, err := template.ParseFiles(t)
+		if err == nil {
+			tmpl = tmpTmpl
+		} else {
+			log.Printf("parse configured template failed: %s\n", err)
+		}
+	} else if t := tp.cfg.TemplateText(); t != "" {
+		tmpTmplTxt, err := template.New("templateText").Parse(t)
+		if err == nil {
+			tmpl = tmpTmplTxt
+		} else {
+			log.Printf("parse configured template failed: %s\n", err)
+		}
+	}
+
+	host := "github.com"
+	if tp.gh.BaseURL != nil {
+		host = strings.TrimPrefix(tp.gh.BaseURL.Host, "api.")
+	}
+	currTag := fullTag(tp.normalizedTagPrefix, currVer.Tag())
+	nextTag := fullTag(tp.normalizedTagPrefix, nextVer.Tag())
+	orig = replaceCompareLink(orig, host, tp.owner, tp.repo, currTag, nextTag, rcBranch)
+	pt := newPRTmpl(tmpl)
+	prText, err := pt.Render(&tmplArg{
+		NextVersion: nextVer.Tag(),
+		Branch:      rcBranch,
+		Changelog:   orig,
+		TagPrefix:   strings.TrimSuffix(tp.normalizedTagPrefix, "/"),
+	})
+	if err != nil {
+		return err
+	}
+
+	stuffs := strings.SplitN(strings.TrimSpace(prText), "\n", 2)
+	title := stuffs[0]
+	var body string
+	if len(stuffs) > 1 {
+		body = strings.TrimSpace(stuffs[1])
+	}
+	if currTagPR == nil {
+		pr, resp, err := tp.gh.PullRequests.Create(ctx, tp.owner, tp.repo, &github.NewPullRequest{
+			Title: github.Ptr(title),
+			Body:  github.Ptr(body),
+			Base:  &releaseBranch,
+			Head:  github.Ptr(head),
+		})
+		if err != nil {
+			showGHError(err, resp)
+			return err
+		}
+		addingLabels = append(addingLabels, autoLabelName)
+		_, resp, err = tp.gh.Issues.AddLabelsToIssue(
+			ctx, tp.owner, tp.repo, *pr.Number, addingLabels)
+		if err != nil {
+			showGHError(err, resp)
+			return err
+		}
+		tmpPr, resp, err := tp.gh.PullRequests.Get(ctx, tp.owner, tp.repo, *pr.Number)
+		if err == nil {
+			pr = tmpPr
+		} else {
+			showGHError(err, resp)
+		}
+		b, _ := json.Marshal(pr)
+		tp.setOutput("pull_request", string(b))
+		return nil
+	}
+	currTagPR.Title = github.Ptr(title)
+	currTagPR.Body = github.Ptr(mergeBody(*currTagPR.Body, body))
+	// Clear Base so go-github does not include the `base` field in the PATCH
+	// payload. When `base` is sent shortly after an UpdateRef (force-push),
+	// GitHub emits a duplicate `pull_request.synchronize` webhook, causing
+	// pull_request-triggered workflows to run twice on the same SHA.
+	// Release PRs never change their base branch, so this is safe.
+	// See: https://github.com/google/go-github/issues/1250
+	currTagPR.Base = nil
+	pr, resp, err := tp.gh.PullRequests.Edit(ctx, tp.owner, tp.repo, *currTagPR.Number, currTagPR)
+	if err != nil {
+		showGHError(err, resp)
+		return err
+	}
+	if len(addingLabels) > 0 {
+		_, resp, err := tp.gh.Issues.AddLabelsToIssue(
+			ctx, tp.owner, tp.repo, *currTagPR.Number, addingLabels)
+		if err != nil {
+			showGHError(err, resp)
+			return err
+		}
+		tmpPr, resp, err := tp.gh.PullRequests.Get(ctx, tp.owner, tp.repo, *pr.Number)
+		if err == nil {
+			pr = tmpPr
+		} else {
+			showGHError(err, resp)
+		}
+	}
+	b, _ := json.Marshal(pr)
+	tp.setOutput("pull_request", string(b))
+	return nil
+}
+
+func replaceCompareLink(orig, host, owner, repo, currTag, nextTag, rcBranch string) string {
+	const base = `**Full Changelog**: https://%s/%s/%s/compare/%s...%s`
+	beforeCompareURL := fmt.Sprintf(base, host, owner, repo, currTag, nextTag)
+	afterCompareURL := fmt.Sprintf(base, host, owner, repo, currTag, rcBranch)
+	return strings.ReplaceAll(orig, beforeCompareURL, afterCompareURL)
+}
+
+var (
+	hasSchemeReg  = regexp.MustCompile("^[^:]+://")
+	scpLikeURLReg = regexp.MustCompile("^([^@]+@)?([^:]+):(/?.+)$")
+)
+
+func parseGitURL(u string) (*url.URL, error) {
+	if !hasSchemeReg.MatchString(u) {
+		if m := scpLikeURLReg.FindStringSubmatch(u); len(m) == 4 {
+			u = fmt.Sprintf("ssh://%s%s/%s", m[1], m[2], strings.TrimPrefix(m[3], "/"))
+		}
+	}
+	return url.Parse(u)
+}
+
+func mergeBody(now, update string) string {
+	// TODO: If there are check boxes, respect what is checked, etc.
+	return update
+}
+
+var headBranchReg = regexp.MustCompile(`(?m)^\s*HEAD branch: (.*)$`)
+
+func (tp *tagpr) Exec(prog string, currVer, nextVer *semv) {
+	var progArgs []string
+	if strings.ContainsAny(prog, " \n") {
+		progArgs = []string{"-c", prog}
+		prog = "sh"
+	}
+	tp.c.Cmd(prog, progArgs, map[string]string{
+		"TAGPR_CURRENT_VERSION": currVer.Tag(),
+		"TAGPR_NEXT_VERSION":    nextVer.Tag(),
+	})
+}
+
+func (tp *tagpr) defaultBranch() (string, error) {
+	// `git symbolic-ref refs/remotes/origin/HEAD` sometimes doesn't work
+	// So use `git remote show origin` for detecting default branch
+	show, _, err := tp.c.Git("remote", "show", tp.remoteName)
+	if err != nil {
+		return "", fmt.Errorf("failed to detect default branch: %w", err)
+	}
+	m := headBranchReg.FindStringSubmatch(show)
+	if len(m) < 2 {
+		return "", fmt.Errorf("failed to detect default branch from remote: %s", tp.remoteName)
+	}
+	return m[1], nil
+}
+
+func (tp *tagpr) detectRemote() (string, error) {
+	remotesStr, _, err := tp.c.Git("remote")
+	if err != nil {
+		return "", fmt.Errorf("failed to detect remote: %s", err)
+	}
+	remotes := strings.Fields(remotesStr)
+	if len(remotes) < 1 {
+		return "", errors.New("failed to detect remote")
+	}
+	for _, r := range remotes {
+		if r == "origin" {
+			return r, nil
+		}
+	}
+	// the last output is the first added remote
+	return remotes[len(remotes)-1], nil
+}
+
+func (tp *tagpr) searchIssues(ctx context.Context, query string) ([]*github.Issue, error) {
+	// Fortunately, we don't need to take care of the page count in response, because
+	// the default value of per_page is 30 and we can't specify more than 30 commits due to
+	// the length limit specification of the query string.
+	issues, resp, err := tp.gh.Search.Issues(ctx, query, nil)
+	if err != nil {
+		showGHError(err, resp)
+		return nil, err
+	}
+	return issues.Issues, nil
+}
+
+func isDependabotPR(issue *github.Issue) bool {
+	return issue.GetUser().GetLogin() == dependabotLogin
+}
+
+func (tp *tagpr) generateNextLabels(prIssues []*github.Issue) []string {
+	majorLabels := tp.cfg.MajorLabels()
+	minorLabels := tp.cfg.MinorLabels()
+	var nextMinor, nextMajor bool
+	for _, issue := range prIssues {
+		if isDependabotPR(issue) {
+			continue
+		}
+		for _, l := range issue.Labels {
+			if slices.Contains(minorLabels, l.GetName()) {
+				nextMinor = true
+			}
+			if slices.Contains(majorLabels, l.GetName()) {
+				nextMajor = true
+			}
+		}
+	}
+	var nextLabels []string
+	if nextMinor {
+		nextLabels = append(nextLabels, "tagpr:minor")
+	}
+	if nextMajor {
+		nextLabels = append(nextLabels, "tagpr:major")
+	}
+
+	return nextLabels
+}
+
+func buildChunkSearchIssuesQuery(qualifiers string, shasStr string) (chunkQueries []string) {
+	// Longer than 256 characters are not supported in the query.
+	// ref. https://docs.github.com/en/rest/reference/search#limitations-on-query-length
+	//
+	// However, although not explicitly stated in the documentation, the space separating
+	// keywords is counted as one or more characters, so it is possible to exceed 256
+	// characters if the text is filled to the very limit of 256 characters.
+	// For this reason, the maximum number of chars in the KEYWORD section is limited to
+	// the following number.
+	const maxKeywordsLength = 200
+
+	// array of SHAs
+	keywords := make([]string, 0, 25)
+	// Make bulk requests with multiple SHAs of the maximum possible length.
+	// If multiple SHAs are specified, the issue search API will treat it like an OR search,
+	// and all the pull requests will be searched.
+	// This is difficult to read from the current documentation, but that is the current
+	// behavior and GitHub support has responded that this is the spec.
+	for sha := range strings.SplitSeq(shasStr, "\n") {
+		if strings.TrimSpace(sha) == "" {
+			continue
+		}
+		tempKeywords := append(keywords, sha)
+		if len(strings.Join(tempKeywords, " ")) >= maxKeywordsLength {
+			chunkQueries = append(chunkQueries, qualifiers+" "+strings.Join(keywords, " "))
+			keywords = make([]string, 0, 25)
+		}
+		keywords = append(keywords, sha)
+	}
+
+	if len(keywords) > 0 {
+		chunkQueries = append(chunkQueries, qualifiers+" "+strings.Join(keywords, " "))
+	}
+
+	return chunkQueries
+}

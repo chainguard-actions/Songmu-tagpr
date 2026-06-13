@@ -1,0 +1,140 @@
+package tagpr
+
+import (
+	"context"
+	"log"
+	"strings"
+	"time"
+
+	"github.com/google/go-github/v83/github"
+)
+
+func (tp *tagpr) latestPullRequest(ctx context.Context) (*github.PullRequest, error) {
+	// tag and exit if the HEAD is the merged tagpr
+	commitish, _, err := tp.c.Git("rev-parse", "HEAD")
+	if err != nil {
+		return nil, err
+	}
+
+	// Retry because GitHub's internal commit-to-PR index may not be updated
+	// immediately after a merge, causing the API to return an empty list.
+	// This is especially common with squash merges but can also happen with
+	// regular merge commits when the workflow triggers within seconds.
+	// See https://github.com/Songmu/tagpr/issues/330
+	const maxRetries = 3
+	const retryInterval = 2 * time.Second
+
+	for i := range maxRetries {
+		pulls, resp, err := tp.gh.PullRequests.ListPullRequestsWithCommit(
+			ctx, tp.owner, tp.repo, commitish, nil)
+		if err != nil {
+			showGHError(err, resp)
+			return nil, err
+		}
+		if len(pulls) > 0 {
+			return pulls[0], nil
+		}
+		if i < maxRetries-1 {
+			log.Printf("ListPullRequestsWithCommit returned empty for %s, retrying in %s (%d/%d)",
+				commitish, retryInterval, i+1, maxRetries)
+			time.Sleep(retryInterval)
+		}
+	}
+	return nil, nil
+}
+
+func (tp *tagpr) tagRelease(ctx context.Context, pr *github.PullRequest, currVer *semv, latestSemverTag string) error {
+	var (
+		vfile string
+		err   error
+	)
+	releaseBranch := tp.cfg.ReleaseBranch()
+
+	// Using "HEAD~" to retrieve the one previous commit before merging does not work well in cases
+	// "Rebase and merge" was used. However, we don't care about "Rebase and merge" and only support
+	// "Create a merge commit" and "Squash and merge."
+	if tp.cfg.VersionFile() == "" {
+		if _, _, err := tp.c.Git("checkout", "HEAD~"); err != nil {
+			return err
+		}
+		vfile, err = detectVersionFile(".", currVer)
+		if err != nil {
+			return err
+		}
+		if _, _, err := tp.c.Git("checkout", releaseBranch); err != nil {
+			return err
+		}
+	} else if tp.cfg.VersionFile() != "-" {
+		vfiles := strings.Split(tp.cfg.VersionFile(), ",")
+		vfile = strings.TrimSpace(vfiles[0])
+	}
+
+	var nextTag string
+	if vfile != "" {
+		nextVer, err := retrieveVersionFromFile(vfile, currVer.vPrefix)
+		if err != nil {
+			return err
+		}
+		nextTag = nextVer.Tag()
+	} else {
+		var labels []string
+		for _, l := range pr.Labels {
+			labels = append(labels, l.GetName())
+		}
+		nextTag = currVer.GuessNext(labels).Tag()
+	}
+	// Add prefix for monorepo support
+	fullNextTag := fullTag(tp.normalizedTagPrefix, nextTag)
+
+	previousTag := &latestSemverTag
+	if *previousTag == "" {
+		previousTag = nil
+	}
+
+	// To avoid putting pull requests created by tagpr itself in the release notes,
+	// we generate release notes in advance.
+	// Get the previous commitish to avoid picking up the merge of the pull
+	// request made by tagpr.
+	targetCommitish, _, err := tp.c.Git("rev-parse", "HEAD~")
+	if err != nil {
+		return nil
+	}
+	releases, resp, err := tp.gh.Repositories.GenerateReleaseNotes(
+		ctx, tp.owner, tp.repo, &github.GenerateNotesOptions{
+			TagName:               fullNextTag,
+			PreviousTagName:       previousTag,
+			TargetCommitish:       &targetCommitish,
+			ConfigurationFilePath: github.Ptr(tp.cfg.ReleaseYAMLPath()),
+		})
+	if err != nil {
+		showGHError(err, resp)
+		return err
+	}
+
+	if _, _, err := tp.c.Git("tag", fullNextTag); err != nil {
+		return err
+	}
+	_, _, err = tp.c.Git("push", "--tags")
+	if err != nil {
+		return err
+	}
+	tp.setOutput("tag", fullNextTag)
+
+	if !tp.cfg.Release() {
+		return nil
+	}
+	// Don't use GenerateReleaseNote flag and use pre generated one
+	_, resp, err = tp.gh.Repositories.CreateRelease(
+		ctx, tp.owner, tp.repo, &github.RepositoryRelease{
+			TagName:         &fullNextTag,
+			TargetCommitish: &releaseBranch,
+			Name:            &releases.Name,
+			Body:            &releases.Body,
+			Draft:           github.Ptr(tp.cfg.ReleaseDraft()),
+		})
+	if err != nil {
+		showGHError(err, resp)
+		return err
+	}
+	return nil
+}
