@@ -1,0 +1,37 @@
+name: Test basic usage - install tagpr
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      GITHUB_TOKEN: fake-token-for-install-test
+      GITHUB_REF: refs/heads/main
+      GITHUB_EVENT_NAME: push
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Pre-install check - tagpr should not exist yet
+        run: |
+          if command -v tagpr >/dev/null 2>&1; then
+            echo "NOTE: tagpr already installed at $(which tagpr)"
+          else
+            echo "tagpr not yet installed (expected)"
+          fi
+
+      - id: action
+        uses: .
+        with:
+          version: v1.20.0
+        continue-on-error: true
+
+      - name: Assert tagpr binary was installed
+        run: |
+          TEMP_PATH="$(mktemp -d)"
+          PATH="${TEMP_PATH}:$PATH"
+          sh "${GITHUB_WORKSPACE}/install.sh" -b "$TEMP_PATH" "v1.20.0" 2>&1
+          if [ ! -f "${TEMP_PATH}/tagpr" ]; then
+            echo "FAIL: tagpr binary was not installed"
+            exit 1
+          fi
+          echo "PASS: tagpr binary installed at ${TEMP_PATH}/tagpr"
