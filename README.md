@@ -9,6 +9,7 @@ Hardened by [Chainguard](https://www.chainguard.dev) from the upstream action at
 | Version | Tag | Upstream commit |
 |---------|-----|-----------------|
 | v1.18.3 | [`v1.18.3`](https://github.com/chainguard-actions/Songmu-tagpr/tree/v1.18.3) | [`9bbb945`](https://github.com/Songmu/tagpr/commit/9bbb945b2fb025126186661e27d55485e3fc6df6) |
+| v1.20.0 | [`v1.20.0`](https://github.com/chainguard-actions/Songmu-tagpr/tree/v1.20.0) | [`e84001b`](https://github.com/Songmu/tagpr/commit/e84001bd5dac8defa0c75b3913937d284a3b3660) |
 
 ## Privacy
 
