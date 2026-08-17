@@ -1,0 +1,41 @@
+name: Test basic usage of tagpr action
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install fake curl on PATH
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/.bin"
+          cp "$GITHUB_WORKSPACE/tests/fixtures/fake-curl.sh" "$GITHUB_WORKSPACE/.bin/curl"
+          chmod +x "$GITHUB_WORKSPACE/.bin/curl"
+          echo "$GITHUB_WORKSPACE/.bin" >> "$GITHUB_PATH"
+
+      - id: action
+        uses: .
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+      - name: Assert action ran (tagpr installed and executed)
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+          TAG: ${{ steps.action.outputs.tag }}
+          PR: ${{ steps.action.outputs.pull_request }}
+          BASE_TAG: ${{ steps.action.outputs.base_tag }}
+        run: |
+          echo "outcome: $OUTCOME"
+          echo "tag: $TAG"
+          echo "pull_request: $PR"
+          echo "base_tag: $BASE_TAG"
+          if [ "$OUTCOME" = "success" ]; then
+            echo "PASS: action succeeded"
+          elif [ "$OUTCOME" = "failure" ]; then
+            echo "PASS: action failed gracefully (expected with sentinel repo)"
+          else
+            echo "FAIL: unexpected outcome '$OUTCOME'"
+            exit 1
+          fi

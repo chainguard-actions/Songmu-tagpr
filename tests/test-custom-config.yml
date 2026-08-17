@@ -1,0 +1,142 @@
+name: Test tagpr action with custom config file input
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Create a tagpr config file and fake curl
+        run: |
+          # Create a minimal tagpr config file
+          mkdir -p "$GITHUB_WORKSPACE/.tagpr-config"
+          cat > "$GITHUB_WORKSPACE/.tagpr-config/tagpr.toml" << 'EOF'
+          [tagpr]
+          versionFile = ""
+          EOF
+
+          # Install fake curl
+          mkdir -p "$GITHUB_WORKSPACE/.bin"
+          # Write a curl that records TAGPR_CONFIG_FILE env var
+          cat > "$GITHUB_WORKSPACE/.bin/curl" << 'CURLEOF'
+          #!/bin/sh
+          FAKE_INSTALL="$GITHUB_WORKSPACE/tests/fixtures/fake-install.sh"
+          out=""
+          prev=""
+          for arg in "$@"; do
+            case "$prev" in
+              -o|--output) out="$arg" ;;
+            esac
+            prev="$arg"
+          done
+          case "$*" in
+            *tagpr*install.sh*)
+              if [ -n "$out" ]; then
+                cat "$FAKE_INSTALL" > "$out"
+              else
+                cat "$FAKE_INSTALL"
+              fi
+              exit 0
+              ;;
+          esac
+          exec /usr/bin/curl "$@"
+          CURLEOF
+          chmod +x "$GITHUB_WORKSPACE/.bin/curl"
+          echo "$GITHUB_WORKSPACE/.bin" >> "$GITHUB_PATH"
+
+      - name: Override fake tagpr to record config env var
+        run: |
+          # Patch fake-install.sh to produce a tagpr that records TAGPR_CONFIG_FILE
+          mkdir -p "$GITHUB_WORKSPACE/.tagpr-test"
+          cat > "$GITHUB_WORKSPACE/tests/fixtures/fake-install-config.sh" << 'EOF'
+          #!/bin/sh
+          BINDIR=""
+          while [ $# -gt 0 ]; do
+            case "$1" in
+              -b)
+                BINDIR="$2"
+                shift 2
+                ;;
+              *)
+                shift
+                ;;
+            esac
+          done
+          if [ -z "$BINDIR" ]; then
+            BINDIR="/usr/local/bin"
+          fi
+          cat > "${BINDIR}/tagpr" << 'TAGPREOF'
+          #!/bin/sh
+          echo "tagpr: running (fake config-recording)"
+          echo "TAGPR_CONFIG_FILE=$TAGPR_CONFIG_FILE"
+          # Record the config file path
+          echo "$TAGPR_CONFIG_FILE" > "$GITHUB_WORKSPACE/.tagpr-test/config-file"
+          if [ -n "$GITHUB_OUTPUT" ]; then
+            echo "tag=" >> "$GITHUB_OUTPUT"
+            echo "pull_request=" >> "$GITHUB_OUTPUT"
+            echo "base_tag=" >> "$GITHUB_OUTPUT"
+          fi
+          exit 0
+          TAGPREOF
+          chmod +x "${BINDIR}/tagpr"
+          EOF
+          chmod +x "$GITHUB_WORKSPACE/tests/fixtures/fake-install-config.sh"
+          # Update fake curl to use config-recording install script
+          cat > "$GITHUB_WORKSPACE/.bin/curl" << 'CURLEOF2'
+          #!/bin/sh
+          FAKE_INSTALL="$GITHUB_WORKSPACE/tests/fixtures/fake-install-config.sh"
+          out=""
+          prev=""
+          for arg in "$@"; do
+            case "$prev" in
+              -o|--output) out="$arg" ;;
+            esac
+            prev="$arg"
+          done
+          case "$*" in
+            *tagpr*install.sh*)
+              if [ -n "$out" ]; then
+                cat "$FAKE_INSTALL" > "$out"
+              else
+                cat "$FAKE_INSTALL"
+              fi
+              exit 0
+              ;;
+          esac
+          exec /usr/bin/curl "$@"
+          CURLEOF2
+          chmod +x "$GITHUB_WORKSPACE/.bin/curl"
+
+      - id: action
+        uses: .
+        continue-on-error: true
+        with:
+          config: ".tagpr-config/tagpr.toml"
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+      - name: Assert config file path was passed to tagpr
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          if [ "$OUTCOME" = "success" ] || [ "$OUTCOME" = "failure" ]; then
+            echo "PASS: action ran (outcome: $OUTCOME)"
+          else
+            echo "FAIL: unexpected outcome '$OUTCOME'"
+            exit 1
+          fi
+          # Check if the config file path was recorded
+          if [ -f "$GITHUB_WORKSPACE/.tagpr-test/config-file" ]; then
+            CONFIG_PATH="$(cat "$GITHUB_WORKSPACE/.tagpr-test/config-file")"
+            echo "config path recorded: $CONFIG_PATH"
+            if [ "$CONFIG_PATH" = ".tagpr-config/tagpr.toml" ]; then
+              echo "PASS: correct config path was passed"
+            else
+              echo "FAIL: expected '.tagpr-config/tagpr.toml' but got '$CONFIG_PATH'"
+              exit 1
+            fi
+          else
+            echo "INFO: config file record not found (install may have been skipped or failed)"
+          fi

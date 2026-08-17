@@ -1,0 +1,5 @@
+package tagpr
+
+const version = "1.20.1"
+
+var revision = "HEAD"
