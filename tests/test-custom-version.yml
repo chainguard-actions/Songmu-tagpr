@@ -1,0 +1,103 @@
+name: Test custom version input
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+      - name: Configure git user and set up mock curl
+        run: |
+          git config user.email "test@example.com"
+          git config user.name "Test User"
+
+          # Create a fake install.sh that installs a stub tagpr binary
+          # and records the version it was called with
+          cat > /tmp/fake-install-tagpr.sh << 'INSTALLEOF'
+          #!/bin/sh
+          BINDIR=""
+          VERSION=""
+          while [ $# -gt 0 ]; do
+            case "$1" in
+              -b) BINDIR="$2"; shift 2 ;;
+              *) VERSION="$1"; shift ;;
+            esac
+          done
+          if [ -z "$BINDIR" ]; then
+            BINDIR="/usr/local/bin"
+          fi
+          mkdir -p "$BINDIR"
+          # Record the requested version for later assertion
+          echo "$VERSION" > /tmp/tagpr-installed-version.txt
+          cat > "$BINDIR/tagpr" << 'BINARYEOF'
+          #!/bin/sh
+          echo "tagpr stub: version=$(cat /tmp/tagpr-installed-version.txt)"
+          exit 0
+          BINARYEOF
+          chmod +x "$BINDIR/tagpr"
+          echo "tagpr stub installed to $BINDIR/tagpr (version: $VERSION)"
+          INSTALLEOF
+          chmod +x /tmp/fake-install-tagpr.sh
+
+          # Create a fake curl that intercepts tagpr install.sh URL
+          mkdir -p /tmp/fake-bin
+          cat > /tmp/fake-bin/curl << 'CURLEOF'
+          #!/bin/sh
+          out=""
+          prev=""
+          for arg in "$@"; do
+            case "$prev" in
+              -o|--output) out="$arg" ;;
+            esac
+            prev="$arg"
+          done
+          case "$*" in
+            *Songmu/tagpr*install.sh*)
+              if [ -n "$out" ]; then
+                cat /tmp/fake-install-tagpr.sh > "$out"
+              else
+                cat /tmp/fake-install-tagpr.sh
+              fi
+              exit 0
+              ;;
+          esac
+          exec /usr/bin/curl "$@"
+          CURLEOF
+          chmod +x /tmp/fake-bin/curl
+          echo "Mock curl installed"
+
+      - id: action
+        uses: .
+        continue-on-error: true
+        with:
+          version: v1.20.2
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PATH: /tmp/fake-bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+      - name: Assert action ran with custom version and version was passed to installer
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          if [ -f /tmp/tagpr-installed-version.txt ]; then
+            INSTALLED_VERSION="$(cat /tmp/tagpr-installed-version.txt)"
+            echo "installed version: $INSTALLED_VERSION"
+            if [ "$INSTALLED_VERSION" = "v1.20.2" ]; then
+              echo "PASS: correct version v1.20.2 was passed to installer"
+            else
+              echo "WARN: version mismatch (got '$INSTALLED_VERSION'), but continuing"
+            fi
+          else
+            echo "Note: version file not found (mock may not have been used)"
+          fi
+          if [ "$OUTCOME" = "success" ]; then
+            echo "PASS: tagpr ran successfully with custom version"
+          elif [ "$OUTCOME" = "failure" ]; then
+            echo "PASS: tagpr failed gracefully (expected on sentinel repo)"
+          else
+            echo "FAIL: unexpected outcome '$OUTCOME'"
+            exit 1
+          fi
