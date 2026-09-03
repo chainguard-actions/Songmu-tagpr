@@ -1,0 +1,102 @@
+name: Test tagpr action with custom version input (mocked)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Set up fake curl that records the version argument
+        run: |
+          mkdir -p /tmp/fake-bin-version
+
+          # Create a fake install script that records the version it was called with
+          cat > /tmp/fake-install-tagpr-version.sh << 'INSTALLSCRIPT'
+          #!/bin/sh
+          # Fake install.sh: parse -b <bindir> and version arg, record them
+          BINDIR=""
+          VERSION=""
+          skip_next=0
+          for arg in "$@"; do
+            if [ "$skip_next" = "1" ]; then
+              BINDIR="$arg"
+              skip_next=0
+              continue
+            fi
+            case "$arg" in
+              -b) skip_next=1 ;;
+              v*) VERSION="$arg" ;;
+            esac
+          done
+          if [ -z "$BINDIR" ]; then
+            BINDIR="/usr/local/bin"
+          fi
+          mkdir -p "$BINDIR"
+          # Record the version that was requested
+          echo "$VERSION" > /tmp/tagpr-requested-version.txt
+          # Create a fake tagpr binary
+          cat > "$BINDIR/tagpr" << 'TAGPRSCRIPT'
+          #!/bin/sh
+          echo "tag=" >> "$GITHUB_OUTPUT"
+          echo "pull_request=" >> "$GITHUB_OUTPUT"
+          echo "base_tag=" >> "$GITHUB_OUTPUT"
+          TAGPRSCRIPT
+          chmod +x "$BINDIR/tagpr"
+          INSTALLSCRIPT
+          chmod +x /tmp/fake-install-tagpr-version.sh
+
+          # Create a fake curl
+          cat > /tmp/fake-bin-version/curl << 'CURLSCRIPT'
+          #!/bin/sh
+          out=""
+          prev=""
+          for arg in "$@"; do
+            case "$prev" in
+              -o|--output) out="$arg" ;;
+            esac
+            prev="$arg"
+          done
+          case "$*" in
+            *tagpr*install.sh*)
+              if [ -n "$out" ]; then
+                cat /tmp/fake-install-tagpr-version.sh > "$out"
+              else
+                cat /tmp/fake-install-tagpr-version.sh
+              fi
+              exit 0
+              ;;
+          esac
+          exec /usr/bin/curl "$@"
+          CURLSCRIPT
+          chmod +x /tmp/fake-bin-version/curl
+
+          echo "/tmp/fake-bin-version" >> "$GITHUB_PATH"
+
+      - name: Set up git config
+        run: |
+          git config user.email "test@example.com"
+          git config user.name "Test User"
+
+      - id: action
+        uses: .
+        with:
+          version: "v1.19.0"
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+      - name: Assert correct version was requested
+        run: |
+          if [ ! -f /tmp/tagpr-requested-version.txt ]; then
+            echo "FAIL: version file not found — install script may not have run"
+            exit 1
+          fi
+          REQUESTED="$(cat /tmp/tagpr-requested-version.txt)"
+          echo "requested version: $REQUESTED"
+          if [ "$REQUESTED" != "v1.19.0" ]; then
+            echo "FAIL: expected version 'v1.19.0', got '$REQUESTED'"
+            exit 1
+          fi
+          echo "PASS: correct version was passed to install script"

@@ -1,0 +1,114 @@
+name: Test basic tagpr action (mocked)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Set up fake curl and fake tagpr
+        run: |
+          # Create a temp bin dir that will be prepended to PATH for the action
+          mkdir -p /tmp/fake-bin
+
+          # Create a fake install script that the fake curl will serve
+          # This script just creates a fake tagpr binary in the target dir
+          cat > /tmp/fake-install-tagpr.sh << 'INSTALLSCRIPT'
+          #!/bin/sh
+          # Fake install.sh: parse -b <bindir> and install a fake tagpr there
+          BINDIR=""
+          while [ $# -gt 0 ]; do
+            case "$1" in
+              -b) BINDIR="$2"; shift 2 ;;
+              *) shift ;;
+            esac
+          done
+          if [ -z "$BINDIR" ]; then
+            BINDIR="/usr/local/bin"
+          fi
+          mkdir -p "$BINDIR"
+          cat > "$BINDIR/tagpr" << 'TAGPRSCRIPT'
+          #!/bin/sh
+          # Fake tagpr: emit outputs that the action reads
+          echo "tag=v1.2.3" >> "$GITHUB_OUTPUT"
+          echo "pull_request={\"number\":42,\"html_url\":\"https://github.com/example/repo/pull/42\"}" >> "$GITHUB_OUTPUT"
+          echo "base_tag=v1.2.2" >> "$GITHUB_OUTPUT"
+          TAGPRSCRIPT
+          chmod +x "$BINDIR/tagpr"
+          INSTALLSCRIPT
+          chmod +x /tmp/fake-install-tagpr.sh
+
+          # Create a fake curl that serves the fake install script
+          # Supports both "curl URL | sh" (stdout) and hardened "curl -o FILE URL" forms
+          cat > /tmp/fake-bin/curl << 'CURLSCRIPT'
+          #!/bin/sh
+          out=""
+          prev=""
+          for arg in "$@"; do
+            case "$prev" in
+              -o|--output) out="$arg" ;;
+            esac
+            prev="$arg"
+          done
+          case "$*" in
+            *tagpr*install.sh*)
+              if [ -n "$out" ]; then
+                cat /tmp/fake-install-tagpr.sh > "$out"
+              else
+                cat /tmp/fake-install-tagpr.sh
+              fi
+              exit 0
+              ;;
+          esac
+          exec /usr/bin/curl "$@"
+          CURLSCRIPT
+          chmod +x /tmp/fake-bin/curl
+
+          # Prepend fake-bin to PATH so the action picks up our fake curl
+          echo "/tmp/fake-bin" >> "$GITHUB_PATH"
+
+      - name: Set up git config for tagpr
+        run: |
+          git config user.email "test@example.com"
+          git config user.name "Test User"
+
+      - id: action
+        uses: .
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+      - name: Assert tag output
+        env:
+          TAG: ${{ steps.action.outputs.tag }}
+        run: |
+          echo "tag: $TAG"
+          if [ "$TAG" != "v1.2.3" ]; then
+            echo "FAIL: expected tag 'v1.2.3', got '$TAG'"
+            exit 1
+          fi
+          echo "PASS: tag output is correct"
+
+      - name: Assert pull_request output
+        env:
+          PR: ${{ steps.action.outputs.pull_request }}
+        run: |
+          echo "pull_request: $PR"
+          if [ -z "$PR" ]; then
+            echo "FAIL: pull_request output is empty"
+            exit 1
+          fi
+          echo "PASS: pull_request output is set"
+
+      - name: Assert base_tag output
+        env:
+          BASE_TAG: ${{ steps.action.outputs.base_tag }}
+        run: |
+          echo "base_tag: $BASE_TAG"
+          if [ "$BASE_TAG" != "v1.2.2" ]; then
+            echo "FAIL: expected base_tag 'v1.2.2', got '$BASE_TAG'"
+            exit 1
+          fi
+          echo "PASS: base_tag output is correct"
