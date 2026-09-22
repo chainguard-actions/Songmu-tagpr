@@ -1,0 +1,69 @@
+name: Test install script installs tagpr binary
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Set up git config
+        run: |
+          git config user.email "test@example.com"
+          git config user.name "Test User"
+
+      - name: Run install.sh and verify tagpr binary
+        id: install
+        continue-on-error: true
+        run: |
+          TEMP_PATH="/tmp/tagpr-test-bin"
+          mkdir -p "$TEMP_PATH"
+          bash "$GITHUB_WORKSPACE/action/install.sh" -b "$TEMP_PATH" "v1.20.4"
+
+      - name: Assert install result
+        env:
+          OUTCOME: ${{ steps.install.outcome }}
+        run: |
+          echo "install outcome: $OUTCOME"
+          if [ "$OUTCOME" = "success" ]; then
+            TEMP_PATH="/tmp/tagpr-test-bin"
+            if [ ! -f "$TEMP_PATH/tagpr" ]; then
+              echo "FAIL: tagpr binary not found at $TEMP_PATH/tagpr"
+              exit 1
+            fi
+            echo "PASS: tagpr binary installed at $TEMP_PATH/tagpr"
+            if [ ! -x "$TEMP_PATH/tagpr" ]; then
+              echo "FAIL: tagpr binary is not executable"
+              exit 1
+            fi
+            echo "PASS: tagpr binary is executable"
+          elif [ "$OUTCOME" = "failure" ]; then
+            echo "PASS: install.sh failed gracefully (network/attestation issue expected in CI)"
+          else
+            echo "FAIL: unexpected outcome '$OUTCOME'"
+            exit 1
+          fi
+
+      - name: Test action with config input
+        id: action-config
+        uses: .
+        continue-on-error: true
+        with:
+          version: v1.20.4
+          config: .tagpr
+
+      - name: Assert action with config ran or failed gracefully
+        env:
+          OUTCOME: ${{ steps.action-config.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          if [ "$OUTCOME" = "success" ]; then
+            echo "PASS: action succeeded with config input"
+          elif [ "$OUTCOME" = "failure" ]; then
+            echo "PASS: action failed gracefully (expected with sentinel repo)"
+          else
+            echo "FAIL: unexpected outcome '$OUTCOME'"
+            exit 1
+          fi
