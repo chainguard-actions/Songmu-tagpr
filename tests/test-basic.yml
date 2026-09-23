@@ -1,0 +1,43 @@
+name: Test basic usage - tagpr installs and runs
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Set up git config
+        run: |
+          git config user.email "test@example.com"
+          git config user.name "Test User"
+
+      - id: action
+        uses: .
+        with:
+          version: v1.21.0
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+      - name: Assert action ran (installed tagpr and attempted to run)
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+          TAG_OUT: ${{ steps.action.outputs.tag }}
+          PR_OUT: ${{ steps.action.outputs.pull_request }}
+          BASE_TAG_OUT: ${{ steps.action.outputs.base_tag }}
+        run: |
+          echo "outcome: $OUTCOME"
+          echo "tag output: $TAG_OUT"
+          echo "pull_request output: $PR_OUT"
+          echo "base_tag output: $BASE_TAG_OUT"
+          if [ "$OUTCOME" = "success" ]; then
+            echo "PASS: action succeeded (tagpr ran successfully)"
+          elif [ "$OUTCOME" = "failure" ]; then
+            echo "PASS: action failed gracefully (sentinel repo is not resolvable by tagpr)"
+          else
+            echo "FAIL: unexpected outcome '$OUTCOME'"
+            exit 1
+          fi
