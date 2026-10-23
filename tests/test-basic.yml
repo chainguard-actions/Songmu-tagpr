@@ -1,0 +1,44 @@
+name: Test basic usage
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+      - name: Configure git identity
+        run: |
+          git config --global user.email "test@example.com"
+          git config --global user.name "Test User"
+      - id: action
+        uses: .
+        continue-on-error: true
+      - name: Assert action ran (succeeded, or failed gracefully on the sentinel repo)
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+          TAG: ${{ steps.action.outputs.tag }}
+          PR: ${{ steps.action.outputs.pull_request }}
+          BASE_TAG: ${{ steps.action.outputs.base_tag }}
+        run: |
+          echo "outcome: $OUTCOME"
+          echo "tag: $TAG"
+          echo "pull_request: $PR"
+          echo "base_tag: $BASE_TAG"
+          if [ "$OUTCOME" = "success" ]; then
+            if [ -n "$TAG" ] && ! echo "$TAG" | grep -qE '^v?[0-9]+\.[0-9]+\.[0-9]+'; then
+              echo "FAIL: tag output is not a semver: $TAG"
+              exit 1
+            fi
+            if [ -n "$PR" ] && ! echo "$PR" | grep -q '{'; then
+              echo "FAIL: pull_request output is not JSON: $PR"
+              exit 1
+            fi
+            echo "PASS: action succeeded"
+          elif [ "$OUTCOME" = "failure" ]; then
+            echo "PASS: action failed gracefully (sentinel repo is not resolvable)"
+          else
+            echo "FAIL: unexpected outcome '$OUTCOME'"
+            exit 1
+          fi

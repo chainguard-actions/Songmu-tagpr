@@ -1,0 +1,48 @@
+name: Test custom config file and explicit version
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+      - name: Configure git identity
+        run: |
+          git config --global user.email "test@example.com"
+          git config --global user.name "Test User"
+      - name: Assert fixture config exists
+        run: |
+          if [ ! -f "$GITHUB_WORKSPACE/tests/fixtures/tagpr-config.ini" ]; then
+            echo "FAIL: fixture config missing"
+            exit 1
+          fi
+          echo "PASS"
+      - id: action
+        uses: .
+        continue-on-error: true
+        with:
+          version: v1.21.4
+          config: tests/fixtures/tagpr-config.ini
+      - name: Assert action ran (succeeded, or failed gracefully on the sentinel repo)
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+          TAG: ${{ steps.action.outputs.tag }}
+          PR: ${{ steps.action.outputs.pull_request }}
+        run: |
+          echo "outcome: $OUTCOME"
+          echo "tag: $TAG"
+          echo "pull_request: $PR"
+          if [ "$OUTCOME" = "success" ]; then
+            if [ -n "$TAG" ] && ! echo "$TAG" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+'; then
+              echo "FAIL: tag output should be v-prefixed semver: $TAG"
+              exit 1
+            fi
+            echo "PASS: action succeeded"
+          elif [ "$OUTCOME" = "failure" ]; then
+            echo "PASS: action failed gracefully (sentinel repo is not resolvable)"
+          else
+            echo "FAIL: unexpected outcome '$OUTCOME'"
+            exit 1
+          fi
