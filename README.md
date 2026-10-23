@@ -19,6 +19,7 @@ Hardened by [Chainguard](https://www.chainguard.dev) from the upstream action at
 | v1.21.1 | [`v1.21.1`](https://github.com/chainguard-actions/Songmu-tagpr/tree/v1.21.1) | [`967f2ab`](https://github.com/Songmu/tagpr/commit/967f2ab22be958948fb5bd439bfa3d404dd9dee8) |
 | v1.21.2 | [`v1.21.2`](https://github.com/chainguard-actions/Songmu-tagpr/tree/v1.21.2) | [`0c4eb5a`](https://github.com/Songmu/tagpr/commit/0c4eb5a3b0862693702acea436a7c68bd586530d) |
 | v1.21.3 | [`v1.21.3`](https://github.com/chainguard-actions/Songmu-tagpr/tree/v1.21.3) | [`1fcd729`](https://github.com/Songmu/tagpr/commit/1fcd7292d1fe8ea9a8313eef46b8d80b7a15d227) |
+| v1.21.4 | [`v1.21.4`](https://github.com/chainguard-actions/Songmu-tagpr/tree/v1.21.4) | [`e1250d6`](https://github.com/Songmu/tagpr/commit/e1250d6c84e4425db82b5e90549d62dfe23e9ebe) |
 
 ## Privacy
 
