@@ -6,20 +6,20 @@ Hardened by [Chainguard](https://www.chainguard.dev) from the upstream action at
 
 ## Versions
 
-| Version | Tag | Upstream commit |
-|---------|-----|-----------------|
-| v1 | [`v1`](https://github.com/chainguard-actions/Songmu-tagpr/tree/v1) | [`7ebae2d`](https://github.com/Songmu/tagpr/commit/7ebae2dcc300132baa7cc9dd108c8923b07fc366) |
-| v1.18.3 | [`v1.18.3`](https://github.com/chainguard-actions/Songmu-tagpr/tree/v1.18.3) | [`9bbb945`](https://github.com/Songmu/tagpr/commit/9bbb945b2fb025126186661e27d55485e3fc6df6) |
-| v1.20.0 | [`v1.20.0`](https://github.com/chainguard-actions/Songmu-tagpr/tree/v1.20.0) | [`e84001b`](https://github.com/Songmu/tagpr/commit/e84001bd5dac8defa0c75b3913937d284a3b3660) |
-| v1.20.1 | [`v1.20.1`](https://github.com/chainguard-actions/Songmu-tagpr/tree/v1.20.1) | [`d1b8138`](https://github.com/Songmu/tagpr/commit/d1b8138b7a31075141b6cd64103de9485ced7ac9) |
-| v1.20.2 | [`v1.20.2`](https://github.com/chainguard-actions/Songmu-tagpr/tree/v1.20.2) | [`242e229`](https://github.com/Songmu/tagpr/commit/242e22916eb775d6e359959fe3ba5c497de4a01a) |
-| v1.20.3 | [`v1.20.3`](https://github.com/chainguard-actions/Songmu-tagpr/tree/v1.20.3) | [`7ebae2d`](https://github.com/Songmu/tagpr/commit/7ebae2dcc300132baa7cc9dd108c8923b07fc366) |
-| v1.20.4 | [`v1.20.4`](https://github.com/chainguard-actions/Songmu-tagpr/tree/v1.20.4) | [`bca0c78`](https://github.com/Songmu/tagpr/commit/bca0c78861c25f5b38f97f11e73b67c9b01b3aef) |
-| v1.21.0 | [`v1.21.0`](https://github.com/chainguard-actions/Songmu-tagpr/tree/v1.21.0) | [`2afc990`](https://github.com/Songmu/tagpr/commit/2afc990a4a5a9a340665cc1a484c2102f7de332f) |
-| v1.21.1 | [`v1.21.1`](https://github.com/chainguard-actions/Songmu-tagpr/tree/v1.21.1) | [`967f2ab`](https://github.com/Songmu/tagpr/commit/967f2ab22be958948fb5bd439bfa3d404dd9dee8) |
-| v1.21.2 | [`v1.21.2`](https://github.com/chainguard-actions/Songmu-tagpr/tree/v1.21.2) | [`0c4eb5a`](https://github.com/Songmu/tagpr/commit/0c4eb5a3b0862693702acea436a7c68bd586530d) |
-| v1.21.3 | [`v1.21.3`](https://github.com/chainguard-actions/Songmu-tagpr/tree/v1.21.3) | [`1fcd729`](https://github.com/Songmu/tagpr/commit/1fcd7292d1fe8ea9a8313eef46b8d80b7a15d227) |
-| v1.21.4 | [`v1.21.4`](https://github.com/chainguard-actions/Songmu-tagpr/tree/v1.21.4) | [`e1250d6`](https://github.com/Songmu/tagpr/commit/e1250d6c84e4425db82b5e90549d62dfe23e9ebe) |
+| Version | Tag | Upstream commit | Hardening report |
+|---------|-----|-----------------|------------------|
+| v1 | [`v1`](https://github.com/chainguard-actions/Songmu-tagpr/tree/v1) | [`7ebae2d`](https://github.com/Songmu/tagpr/commit/7ebae2dcc300132baa7cc9dd108c8923b07fc366) | — |
+| v1.18.3 | [`v1.18.3`](https://github.com/chainguard-actions/Songmu-tagpr/tree/v1.18.3) | [`9bbb945`](https://github.com/Songmu/tagpr/commit/9bbb945b2fb025126186661e27d55485e3fc6df6) | [`HARDENING.md`](https://github.com/chainguard-actions/Songmu-tagpr/blob/v1.18.3/HARDENING.md) |
+| v1.20.0 | [`v1.20.0`](https://github.com/chainguard-actions/Songmu-tagpr/tree/v1.20.0) | [`e84001b`](https://github.com/Songmu/tagpr/commit/e84001bd5dac8defa0c75b3913937d284a3b3660) | [`HARDENING.md`](https://github.com/chainguard-actions/Songmu-tagpr/blob/v1.20.0/HARDENING.md) |
+| v1.20.1 | [`v1.20.1`](https://github.com/chainguard-actions/Songmu-tagpr/tree/v1.20.1) | [`d1b8138`](https://github.com/Songmu/tagpr/commit/d1b8138b7a31075141b6cd64103de9485ced7ac9) | [`HARDENING.md`](https://github.com/chainguard-actions/Songmu-tagpr/blob/v1.20.1/HARDENING.md) |
+| v1.20.2 | [`v1.20.2`](https://github.com/chainguard-actions/Songmu-tagpr/tree/v1.20.2) | [`242e229`](https://github.com/Songmu/tagpr/commit/242e22916eb775d6e359959fe3ba5c497de4a01a) | [`HARDENING.md`](https://github.com/chainguard-actions/Songmu-tagpr/blob/v1.20.2/HARDENING.md) |
+| v1.20.3 | [`v1.20.3`](https://github.com/chainguard-actions/Songmu-tagpr/tree/v1.20.3) | [`7ebae2d`](https://github.com/Songmu/tagpr/commit/7ebae2dcc300132baa7cc9dd108c8923b07fc366) | [`HARDENING.md`](https://github.com/chainguard-actions/Songmu-tagpr/blob/v1.20.3/HARDENING.md) |
+| v1.20.4 | [`v1.20.4`](https://github.com/chainguard-actions/Songmu-tagpr/tree/v1.20.4) | [`bca0c78`](https://github.com/Songmu/tagpr/commit/bca0c78861c25f5b38f97f11e73b67c9b01b3aef) | [`HARDENING.md`](https://github.com/chainguard-actions/Songmu-tagpr/blob/v1.20.4/HARDENING.md) |
+| v1.21.0 | [`v1.21.0`](https://github.com/chainguard-actions/Songmu-tagpr/tree/v1.21.0) | [`2afc990`](https://github.com/Songmu/tagpr/commit/2afc990a4a5a9a340665cc1a484c2102f7de332f) | [`HARDENING.md`](https://github.com/chainguard-actions/Songmu-tagpr/blob/v1.21.0/HARDENING.md) |
+| v1.21.1 | [`v1.21.1`](https://github.com/chainguard-actions/Songmu-tagpr/tree/v1.21.1) | [`967f2ab`](https://github.com/Songmu/tagpr/commit/967f2ab22be958948fb5bd439bfa3d404dd9dee8) | [`HARDENING.md`](https://github.com/chainguard-actions/Songmu-tagpr/blob/v1.21.1/HARDENING.md) |
+| v1.21.2 | [`v1.21.2`](https://github.com/chainguard-actions/Songmu-tagpr/tree/v1.21.2) | [`0c4eb5a`](https://github.com/Songmu/tagpr/commit/0c4eb5a3b0862693702acea436a7c68bd586530d) | [`HARDENING.md`](https://github.com/chainguard-actions/Songmu-tagpr/blob/v1.21.2/HARDENING.md) |
+| v1.21.3 | [`v1.21.3`](https://github.com/chainguard-actions/Songmu-tagpr/tree/v1.21.3) | [`1fcd729`](https://github.com/Songmu/tagpr/commit/1fcd7292d1fe8ea9a8313eef46b8d80b7a15d227) | [`HARDENING.md`](https://github.com/chainguard-actions/Songmu-tagpr/blob/v1.21.3/HARDENING.md) |
+| v1.21.4 | [`v1.21.4`](https://github.com/chainguard-actions/Songmu-tagpr/tree/v1.21.4) | [`e1250d6`](https://github.com/Songmu/tagpr/commit/e1250d6c84e4425db82b5e90549d62dfe23e9ebe) | [`HARDENING.md`](https://github.com/chainguard-actions/Songmu-tagpr/blob/v1.21.4/HARDENING.md) |
 
 ## Privacy
 
