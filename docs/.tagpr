@@ -1,0 +1,9 @@
+[tagpr]
+    vPrefix = false
+    releaseBranch = main
+    versionFile = docs/VERSION
+    changelog = false
+    releaseYAMLPath = .github/docs-release.yml
+    release = false
+    tagPrefix = docs
+    calendarVersioning = YYYY.0M0D.MICRO

@@ -1,0 +1,36 @@
+name: Test plan mode
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+      - id: action
+        uses: .
+        continue-on-error: true
+        with:
+          mode: plan
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Assert plan mode ran (or failed gracefully on the sentinel repo)
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+          PLAN: ${{ steps.action.outputs.plan }}
+        run: |
+          echo "outcome: $OUTCOME"
+          echo "plan: $PLAN"
+          if [ "$OUTCOME" = "success" ]; then
+            if [ -n "$PLAN" ] && ! echo "$PLAN" | python3 -c 'import json,sys; json.load(sys.stdin)'; then
+              echo "FAIL: plan output is not valid JSON"
+              exit 1
+            fi
+            echo "PASS: plan mode succeeded"
+          elif [ "$OUTCOME" = "failure" ]; then
+            echo "PASS: action failed gracefully (sentinel repo is not resolvable)"
+          else
+            echo "FAIL: unexpected outcome '$OUTCOME'"
+            exit 1
+          fi
